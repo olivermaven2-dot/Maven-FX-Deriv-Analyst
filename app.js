@@ -1,5 +1,4 @@
-const APP_ID="1089";
-const WS_URLS=[`wss://ws.binaryws.com/websockets/v3?app_id=${APP_ID}`,`wss://ws.derivws.com/websockets/v3?app_id=${APP_ID}`];
+const WS_URLS=["wss://ws.binaryws.com/websockets/v3","wss://ws.derivws.com/websockets/v3"];
 const MAX_TICKS=2000, STREAM_SIZE=80;
 const state={socket:null,markets:[],symbol:"R_100",marketName:"R_100",ticks:[],digits:[],engine:"overunder",connected:false,lastTickAt:0,reconnectTimer:null,reconnectDelay:1000,req:0,endpointIndex:0,connectTimer:null};
 
@@ -13,15 +12,38 @@ function esc(s){return String(s).replace(/[&<>"']/g,m=>({"&":"&amp;","<":"&lt;",
 
 function connect(){
   if(state.socket){try{state.socket.onclose=null;state.socket.close()}catch{}}
-  clearTimeout(state.connectTimer);
-  setStatus("connecting","Connecting");
+  clearTimeout(state.connectTimer); clearTimeout(state.reconnectTimer);
+  state.connected=false;
+  setStatus("connecting","Connecting to Deriv");
   const url=WS_URLS[state.endpointIndex%WS_URLS.length];
   const ws=new WebSocket(url); state.socket=ws;
-  state.connectTimer=setTimeout(()=>{if(ws.readyState!==WebSocket.OPEN){try{ws.close()}catch{}state.endpointIndex++;setStatus("offline","Retrying connection");scheduleReconnect()}},8000);
-  ws.onopen=()=>{clearTimeout(state.connectTimer);state.connected=true;state.reconnectDelay=1000;setStatus("live","LIVE");request({active_symbols:"brief",product_type:"basic",req_id:nextReq()})};
+  state.connectTimer=setTimeout(()=>{
+    if(ws.readyState!==WebSocket.OPEN){
+      try{ws.onclose=null;ws.close()}catch{}
+      state.endpointIndex++;
+      setStatus("offline","Connection timeout — retrying");
+      scheduleReconnect();
+    }
+  },12000);
+  ws.onopen=()=>{
+    clearTimeout(state.connectTimer);
+    state.connected=true; state.reconnectDelay=1000;
+    setStatus("live","LIVE — requesting markets");
+    request({ping:1,req_id:nextReq()});
+    request({active_symbols:"brief",req_id:nextReq()});
+  };
   ws.onmessage=e=>{try{handleMessage(JSON.parse(e.data))}catch(err){console.warn("Invalid WebSocket message",err)}};
-  ws.onerror=()=>{clearTimeout(state.connectTimer);state.connected=false;setStatus("error","Connection error")};
-  ws.onclose=()=>{clearTimeout(state.connectTimer);state.connected=false;setStatus("offline","Offline");scheduleReconnect()};
+  ws.onerror=()=>{
+    clearTimeout(state.connectTimer);
+    state.connected=false;
+    setStatus("error","WebSocket error — retrying");
+  };
+  ws.onclose=()=>{
+    clearTimeout(state.connectTimer);
+    state.connected=false;
+    setStatus("offline","Disconnected — retrying");
+    scheduleReconnect();
+  };
 }
 function scheduleReconnect(){
   clearTimeout(state.reconnectTimer);
@@ -33,6 +55,7 @@ function request(obj){if(state.socket?.readyState===WebSocket.OPEN)state.socket.
 
 function handleMessage(d){
   if(d.error){console.warn("Deriv API error:",d.error);setStatus("error",d.error.message||"Deriv data error");return}
+  if(d.msg_type==="ping"){$("diagSocket").textContent="OPEN • PING OK";return}
   if(d.msg_type==="active_symbols")loadMarkets(d.active_symbols||[]);
   if(d.msg_type==="history")loadHistory(d.history?.prices||[],d.history?.times||[]);
   if(d.msg_type==="tick")receiveTick(d.tick);
