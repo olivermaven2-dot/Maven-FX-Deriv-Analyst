@@ -1,24 +1,27 @@
 const APP_ID="1089";
-const WS_URL=`wss://ws.derivws.com/websockets/v3?app_id=${APP_ID}`;
+const WS_URLS=["wss://ws.binaryws.com/websockets/v3","wss://ws.derivws.com/websockets/v3"];
 const MAX_TICKS=2000, STREAM_SIZE=80;
-const state={socket:null,markets:[],symbol:"R_100",marketName:"R_100",ticks:[],digits:[],engine:"overunder",connected:false,lastTickAt:0,reconnectTimer:null,reconnectDelay:1000,req:0};
+const state={socket:null,markets:[],symbol:"R_100",marketName:"R_100",ticks:[],digits:[],engine:"overunder",connected:false,lastTickAt:0,reconnectTimer:null,reconnectDelay:1000,req:0,endpointIndex:0,connectTimer:null};
 
 const $=id=>document.getElementById(id);
 const statusBadge=$("statusBadge"),statusText=$("statusText"),marketSelect=$("marketSelect");
 function setStatus(kind,text){statusBadge.className="status "+kind;statusText.textContent=text;$("diagConnection").textContent=text;$("diagSocket").textContent=state.socket?state.socket.readyState===1?"OPEN":"CLOSED":"—"}
 function fmtPrice(v){return Number(v).toFixed(Math.max(0,Math.min(8,decimalPlaces(v))))}
 function decimalPlaces(v){const s=String(v);return s.includes(".")?s.split(".")[1].length:0}
-function digitFromQuote(quote){const s=String(quote);const clean=s.replace(/[^0-9]/g,"");return clean?Number(clean.at(-1)):null}
+function digitFromQuote(quote){const raw=String(quote);if(raw.includes(".")){const fractional=raw.split(".")[1].replace(/[^0-9]/g,"");if(fractional.length)return Number(fractional.at(-1));}const clean=raw.replace(/[^0-9]/g,"");return clean?Number(clean.at(-1)):null}
 function esc(s){return String(s).replace(/[&<>"']/g,m=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[m]))}
 
 function connect(){
-  if(state.socket){try{state.socket.close()}catch{}}
+  if(state.socket){try{state.socket.onclose=null;state.socket.close()}catch{}}
+  clearTimeout(state.connectTimer);
   setStatus("connecting","Connecting");
-  const ws=new WebSocket(WS_URL); state.socket=ws;
-  ws.onopen=()=>{state.connected=true;state.reconnectDelay=1000;setStatus("live","LIVE");request({active_symbols:"brief",req_id:nextReq()})};
-  ws.onmessage=e=>handleMessage(JSON.parse(e.data));
-  ws.onerror=()=>{setStatus("error","Connection error")};
-  ws.onclose=()=>{state.connected=false;setStatus("offline","Offline");scheduleReconnect()};
+  const url=WS_URLS[state.endpointIndex%WS_URLS.length];
+  const ws=new WebSocket(url); state.socket=ws;
+  state.connectTimer=setTimeout(()=>{if(ws.readyState!==WebSocket.OPEN){try{ws.close()}catch{}state.endpointIndex++;setStatus("offline","Retrying connection");scheduleReconnect()}},8000);
+  ws.onopen=()=>{clearTimeout(state.connectTimer);state.connected=true;state.reconnectDelay=1000;setStatus("live","LIVE");request({active_symbols:"brief",product_type:"basic",req_id:nextReq()})};
+  ws.onmessage=e=>{try{handleMessage(JSON.parse(e.data))}catch(err){console.warn("Invalid WebSocket message",err)}};
+  ws.onerror=()=>{clearTimeout(state.connectTimer);state.connected=false;setStatus("error","Connection error")};
+  ws.onclose=()=>{clearTimeout(state.connectTimer);state.connected=false;setStatus("offline","Offline");scheduleReconnect()};
 }
 function scheduleReconnect(){
   clearTimeout(state.reconnectTimer);
@@ -29,7 +32,7 @@ function nextReq(){return ++state.req}
 function request(obj){if(state.socket?.readyState===WebSocket.OPEN)state.socket.send(JSON.stringify(obj))}
 
 function handleMessage(d){
-  if(d.error){console.warn(d.error);if(d.echo_req?.active_symbols)setStatus("error","Market list unavailable");return}
+  if(d.error){console.warn("Deriv API error:",d.error);setStatus("error",d.error.message||"Deriv data error");return}
   if(d.msg_type==="active_symbols")loadMarkets(d.active_symbols||[]);
   if(d.msg_type==="history")loadHistory(d.history?.prices||[],d.history?.times||[]);
   if(d.msg_type==="tick")receiveTick(d.tick);
@@ -56,18 +59,18 @@ function startMarket(){
   request({ticks:state.symbol,subscribe:1,req_id:nextReq()});
 }
 function loadHistory(prices,times){
-  const arr=prices.map((p,i)=>({quote:Number(p),epoch:times[i]||0})).filter(x=>Number.isFinite(x.quote));
+  const arr=prices.map((p,i)=>({quote:p,epoch:times[i]||0})).filter(x=>Number.isFinite(Number(x.quote)));
   state.ticks=arr.slice(-MAX_TICKS);state.digits=arr.map(x=>digitFromQuote(x.quote)).filter(Number.isInteger).slice(-MAX_TICKS);
   $("diagHistory").textContent=String(arr.length);updateQuality();renderStream();renderEngine();
 }
 function receiveTick(t){
   if(!t||t.symbol!==state.symbol)return;
-  const quote=Number(t.quote);if(!Number.isFinite(quote))return;
-  const digit=digitFromQuote(quote);if(!Number.isInteger(digit))return;
-  state.ticks.push({quote,epoch:t.epoch||Math.floor(Date.now()/1000)});state.digits.push(digit);
+  const quote=t.quote;if(!Number.isFinite(Number(quote)))return;
+  const digit=digitFromQuote(quote,t.pip_size);if(!Number.isInteger(digit))return;
+  state.ticks.push({quote:Number(quote),epoch:t.epoch||Math.floor(Date.now()/1000)});state.digits.push(digit);
   if(state.ticks.length>MAX_TICKS)state.ticks.shift();if(state.digits.length>MAX_TICKS)state.digits.shift();
   state.lastTickAt=Date.now();
-  $("lastPrice").textContent=fmtPrice(quote);$("lastDigit").textContent=digit;
+  $("lastPrice").textContent=String(quote);$("lastDigit").textContent=digit;
   $("tickCount").textContent=state.ticks.length.toLocaleString()+" ticks";$("updatedAt").textContent="Updated "+new Date().toLocaleTimeString();
   $("diagTicks").textContent=state.ticks.length;updateQuality();renderStream();renderEngine();
 }
