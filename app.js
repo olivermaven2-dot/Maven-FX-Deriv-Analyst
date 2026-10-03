@@ -16,22 +16,24 @@ function connect(){
   state.connected=false;
   setStatus("connecting","Connecting to Deriv");
   const url=WS_URLS[state.endpointIndex%WS_URLS.length];
-  const ws=new WebSocket(url); state.socket=ws;
+  let ws;
+  try{ws=new WebSocket(url);state.socket=ws;}
+  catch(err){state.lastError=`WebSocket constructor: ${err.message||err}`;setStatus("error","Browser blocked WebSocket");state.endpointIndex=(state.endpointIndex+1)%WS_URLS.length;scheduleReconnect();return;}
   state.connectTimer=setTimeout(()=>{
     if(ws.readyState!==WebSocket.OPEN){
       try{ws.onclose=null;ws.close()}catch{}
-      state.endpointIndex++;
-      setStatus("offline","Connection timeout — retrying");
+      state.endpointIndex=(state.endpointIndex+1)%WS_URLS.length;
+      setStatus("offline","Connection timeout — switching endpoint");
       scheduleReconnect();
     }
   },12000);
   ws.onopen=()=>{
     clearTimeout(state.connectTimer);
-    state.connected=true; state.reconnectDelay=1000;
+    state.connected=true; state.reconnectDelay=1000; state.lastError="—";
     setStatus("live","LIVE — testing R_100 feed");
     state.lastMessage="WebSocket OPEN";
     request({ping:1,req_id:nextReq()});
-    request({active_symbols:"brief",product_type:"basic",req_id:nextReq()});
+    request({active_symbols:"brief",req_id:nextReq()});
     startMarket(true);
   };
   ws.onmessage=e=>{try{const msg=JSON.parse(e.data);state.lastMessage=msg.msg_type||"unknown";if($("diagMessage"))$("diagMessage").textContent=state.lastMessage;if($("diagLastMessageAt"))$("diagLastMessageAt").textContent=new Date().toLocaleTimeString();handleMessage(msg)}catch(err){state.lastError=String(err.message||err);if($("diagError"))$("diagError").textContent=state.lastError;console.warn("Invalid WebSocket message",err)}};
@@ -39,13 +41,14 @@ function connect(){
     clearTimeout(state.connectTimer);
     state.connected=false;
     state.lastError="Browser WebSocket error";
-    setStatus("error","WebSocket error — retrying");
+    setStatus("error","WebSocket error — switching endpoint");
   };
   ws.onclose=e=>{
     clearTimeout(state.connectTimer);
     state.connected=false;
     state.lastError=`Close ${e.code}${e.reason?": "+e.reason:""}`;
-    setStatus("offline",`Disconnected (${e.code}) — retrying`);
+    state.endpointIndex=(state.endpointIndex+1)%WS_URLS.length;
+    setStatus("offline",`Disconnected (${e.code}) — switching endpoint`);
     scheduleReconnect();
   };
 }
