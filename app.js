@@ -1,5 +1,5 @@
 const APP_ID="1089";
-const WS_URLS=["wss://ws.binaryws.com/websockets/v3","wss://ws.derivws.com/websockets/v3"];
+const WS_URLS=[`wss://ws.binaryws.com/websockets/v3?app_id=${APP_ID}`,`wss://ws.derivws.com/websockets/v3?app_id=${APP_ID}`];
 const MAX_TICKS=2000, STREAM_SIZE=80;
 const state={socket:null,markets:[],symbol:"R_100",marketName:"R_100",ticks:[],digits:[],engine:"overunder",connected:false,lastTickAt:0,reconnectTimer:null,reconnectDelay:1000,req:0,endpointIndex:0,connectTimer:null};
 
