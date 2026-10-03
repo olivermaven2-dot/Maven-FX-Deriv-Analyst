@@ -1,10 +1,10 @@
-const WS_URLS=["wss://ws.binaryws.com/websockets/v3","wss://ws.derivws.com/websockets/v3"];
+const WS_URLS=["wss://ws.binaryws.com/websockets/v3","wss://ws.binaryws.com/websockets/v3?app_id=1089","wss://ws.derivws.com/websockets/v3?app_id=1089"];
 const MAX_TICKS=2000, STREAM_SIZE=80;
-const state={socket:null,markets:[],symbol:"R_100",marketName:"R_100",ticks:[],digits:[],engine:"overunder",connected:false,lastTickAt:0,reconnectTimer:null,reconnectDelay:1000,req:0,endpointIndex:0,connectTimer:null};
+const state={socket:null,markets:[],symbol:"R_100",marketName:"R_100",ticks:[],digits:[],engine:"overunder",connected:false,lastTickAt:0,reconnectTimer:null,reconnectDelay:1000,req:0,endpointIndex:0,connectTimer:null,marketStarted:false,lastMessage:"—",lastError:"—"};
 
 const $=id=>document.getElementById(id);
 const statusBadge=$("statusBadge"),statusText=$("statusText"),marketSelect=$("marketSelect");
-function setStatus(kind,text){statusBadge.className="status "+kind;statusText.textContent=text;$("diagConnection").textContent=text;$("diagSocket").textContent=state.socket?state.socket.readyState===1?"OPEN":"CLOSED":"—"}
+function setStatus(kind,text){statusBadge.className="status "+kind;statusText.textContent=text;$("diagConnection").textContent=text;$("diagSocket").textContent=state.socket?state.socket.readyState===1?"OPEN":"CLOSED":"—";if($("diagEndpoint"))$("diagEndpoint").textContent=WS_URLS[state.endpointIndex%WS_URLS.length];if($("diagMessage"))$("diagMessage").textContent=state.lastMessage;if($("diagError"))$("diagError").textContent=state.lastError}
 function fmtPrice(v){return Number(v).toFixed(Math.max(0,Math.min(8,decimalPlaces(v))))}
 function decimalPlaces(v){const s=String(v);return s.includes(".")?s.split(".")[1].length:0}
 function digitFromQuote(quote){const raw=String(quote);if(raw.includes(".")){const fractional=raw.split(".")[1].replace(/[^0-9]/g,"");if(fractional.length)return Number(fractional.at(-1));}const clean=raw.replace(/[^0-9]/g,"");return clean?Number(clean.at(-1)):null}
@@ -28,20 +28,24 @@ function connect(){
   ws.onopen=()=>{
     clearTimeout(state.connectTimer);
     state.connected=true; state.reconnectDelay=1000;
-    setStatus("live","LIVE — requesting markets");
+    setStatus("live","LIVE — testing R_100 feed");
+    state.lastMessage="WebSocket OPEN";
     request({ping:1,req_id:nextReq()});
-    request({active_symbols:"brief",req_id:nextReq()});
+    request({active_symbols:"brief",product_type:"basic",req_id:nextReq()});
+    startMarket(true);
   };
-  ws.onmessage=e=>{try{handleMessage(JSON.parse(e.data))}catch(err){console.warn("Invalid WebSocket message",err)}};
+  ws.onmessage=e=>{try{const msg=JSON.parse(e.data);state.lastMessage=msg.msg_type||"unknown";if($("diagMessage"))$("diagMessage").textContent=state.lastMessage;if($("diagLastMessageAt"))$("diagLastMessageAt").textContent=new Date().toLocaleTimeString();handleMessage(msg)}catch(err){state.lastError=String(err.message||err);if($("diagError"))$("diagError").textContent=state.lastError;console.warn("Invalid WebSocket message",err)}};
   ws.onerror=()=>{
     clearTimeout(state.connectTimer);
     state.connected=false;
+    state.lastError="Browser WebSocket error";
     setStatus("error","WebSocket error — retrying");
   };
-  ws.onclose=()=>{
+  ws.onclose=e=>{
     clearTimeout(state.connectTimer);
     state.connected=false;
-    setStatus("offline","Disconnected — retrying");
+    state.lastError=`Close ${e.code}${e.reason?": "+e.reason:""}`;
+    setStatus("offline",`Disconnected (${e.code}) — retrying`);
     scheduleReconnect();
   };
 }
@@ -54,7 +58,7 @@ function nextReq(){return ++state.req}
 function request(obj){if(state.socket?.readyState===WebSocket.OPEN)state.socket.send(JSON.stringify(obj))}
 
 function handleMessage(d){
-  if(d.error){console.warn("Deriv API error:",d.error);setStatus("error",d.error.message||"Deriv data error");return}
+  if(d.error){state.lastError=`${d.error.code||"API"}: ${d.error.message||"Deriv data error"}`;if($("diagError"))$("diagError").textContent=state.lastError;console.warn("Deriv API error:",d.error);setStatus("error",d.error.message||"Deriv data error");return}
   if(d.msg_type==="ping"){$("diagSocket").textContent="OPEN • PING OK";return}
   if(d.msg_type==="active_symbols")loadMarkets(d.active_symbols||[]);
   if(d.msg_type==="history")loadHistory(d.history?.prices||[],d.history?.times||[]);
@@ -74,12 +78,15 @@ function loadMarkets(raw){
   for(const [g,items] of Object.entries(groups)){const og=document.createElement("optgroup");og.label=g;for(const m of items){const o=document.createElement("option");o.value=m.symbol;o.textContent=m.name;o.dataset.name=m.name;og.appendChild(o)}marketSelect.appendChild(og)}
   marketSelect.disabled=!state.markets.length;
   const selected=state.markets.find(m=>m.symbol===state.symbol)||state.markets[0];
-  if(selected){state.symbol=selected.symbol;state.marketName=selected.name;marketSelect.value=selected.symbol;$("marketName").textContent=selected.name;startMarket()}
+  if(selected){state.symbol=selected.symbol;state.marketName=selected.name;marketSelect.value=selected.symbol;$("marketName").textContent=selected.name;if(!state.marketStarted)startMarket(true)}
 }
-function startMarket(){
+function startMarket(force=false){
+  if(!force && state.marketStarted && state.symbol==="R_100")return;
+  state.marketStarted=true;
   state.ticks=[];state.digits=[];$("lastPrice").textContent="—";$("lastDigit").textContent="—";renderStream();renderEngine();
   request({ticks_history:state.symbol,end:"latest",count:1000,style:"ticks",req_id:nextReq()});
   request({ticks:state.symbol,subscribe:1,req_id:nextReq()});
+  if($("diagSubscription"))$("diagSubscription").textContent=`Requested ${state.symbol}`;
 }
 function loadHistory(prices,times){
   const arr=prices.map((p,i)=>({quote:p,epoch:times[i]||0})).filter(x=>Number.isFinite(Number(x.quote)));
@@ -150,7 +157,7 @@ function renderRiseFall(root,d,last,n){
   root.innerHTML=panel(st,signal?`Recent directional movement currently leans ${side}.`:"Recent directional evidence is inconclusive.",signal?{main:side,meta:"Qualifying directional continuation",evidence:Math.round(share*100)+"/100"}:null,[`Recent sequence: ${pat}`,`Rise: ${rise} • Fall: ${fall}`,total>=30?"Directional sample is sufficient":"× Directional sample is still building"],n);
 }
 document.querySelectorAll(".engine-tab").forEach(btn=>btn.addEventListener("click",()=>{document.querySelectorAll(".engine-tab").forEach(b=>b.classList.remove("active"));btn.classList.add("active");state.engine=btn.dataset.engine;renderEngine()}));
-marketSelect.addEventListener("change",()=>{const m=state.markets.find(x=>x.symbol===marketSelect.value);if(m){state.symbol=m.symbol;state.marketName=m.name;$("marketName").textContent=m.name;startMarket()}});
+marketSelect.addEventListener("change",()=>{const m=state.markets.find(x=>x.symbol===marketSelect.value);if(m){state.symbol=m.symbol;state.marketName=m.name;$("marketName").textContent=m.name;state.marketStarted=false;startMarket(true)}});
 let touchX=0,touchY=0;
 document.querySelector(".engine-nav").addEventListener("touchstart",e=>{touchX=e.changedTouches[0].clientX;touchY=e.changedTouches[0].clientY},{passive:true});
 document.querySelector(".engine-nav").addEventListener("touchend",e=>{const dx=e.changedTouches[0].clientX-touchX,dy=e.changedTouches[0].clientY-touchY;if(Math.abs(dx)>55&&Math.abs(dx)>Math.abs(dy)){const names=["overunder","evenodd","risefall"],i=names.indexOf(state.engine),next=names[Math.max(0,Math.min(2,i+(dx<0?1:-1)))];document.querySelector(`[data-engine="${next}"]`).click()}},{passive:true});
